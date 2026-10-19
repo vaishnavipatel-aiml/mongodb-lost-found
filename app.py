@@ -5,7 +5,7 @@ import pandas as pd
 
 # --- 1. DATABASE CONNECTION ---
 # PASTE YOUR MONGODB CONNECTION STRING HERE (Replace <password>)
-MONGO_URI = "mongodb+srv://admin:<password>@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority"
+MONGO_URI = st.secrets["MONGO_URI"]
 
 @st.cache_resource
 def init_connection():
