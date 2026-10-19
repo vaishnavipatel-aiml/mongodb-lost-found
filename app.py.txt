@@ -1,0 +1,160 @@
+import streamlit as st
+import pymongo
+from datetime import datetime
+import pandas as pd
+
+# --- 1. DATABASE CONNECTION ---
+# PASTE YOUR MONGODB CONNECTION STRING HERE (Replace <password>)
+MONGO_URI = "mongodb+srv://admin:<password>@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority"
+
+@st.cache_resource
+def init_connection():
+    client = pymongo.MongoClient(MONGO_URI)
+    return client["campus_lost_found"] # Database Name
+
+db = init_connection()
+items_col = db["items"] # Collection Name
+
+# --- 2. UI CONFIGURATION ---
+st.set_page_config(page_title="NoSQL Lost & Found", page_icon="🎒", layout="wide")
+st.title("🎒 Campus Lost & Found (MongoDB Edition)")
+st.markdown("This app is connected to a **live MongoDB Atlas** cloud database using PyMongo.")
+
+# Sidebar navigation
+menu = st.sidebar.radio("Navigation", ["Search Items", "Report Item", "Admin Portal"])
+
+# --- 3. SEARCH ITEMS ---
+if menu == "Search Items":
+    st.header("🔍 Search Database")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        search_query = st.text_input("Search by name or description:")
+    with col2:
+        type_filter = st.selectbox("Type", ["All", "lost", "found"])
+    with col3:
+        cat_filter = st.selectbox("Category", ["All", "Electronics", "Documents", "Accessories", "Bags"])
+
+    # Build MongoDB Query
+    query = {}
+    if search_query:
+        # MongoDB Text Search / Regex
+        query["$or"] = [
+            {"name": {"$regex": search_query, "$options": "i"}},
+            {"description": {"$regex": search_query, "$options": "i"}}
+        ]
+    if type_filter != "All":
+        query["type"] = type_filter
+    if cat_filter != "All":
+        query["category"] = cat_filter
+
+    # Execute Query
+    results = list(items_col.find(query))
+    
+    st.write(f"**MongoDB Query:** `db.items.find({query})`")
+    st.write(f"Found **{len(results)}** documents.")
+
+    # Display Results
+    for item in results:
+        with st.expander(f"{item['name']} ({item['type'].upper()}) - {item['status']}"):
+            st.write(f"**Description:** {item['description']}")
+            st.write(f"**Location:** {item['location']} | **Date:** {item['date']}")
+            
+            if item['status'] == 'Open' and item['type'] == 'found':
+                with st.form(key=f"claim_form_{item['_id']}"):
+                    st.write("### Submit Ownership Claim")
+                    proof = st.text_area("Proof of ownership (e.g., serial number, specific scratch):")
+                    submit_claim = st.form_submit_button("Submit Claim")
+                    
+                    if submit_claim and proof:
+                        # EMBEDDING DOCUMENT IN MONGODB
+                        items_col.update_one(
+                            {"_id": item["_id"]},
+                            {"$set": {
+                                "status": "Pending Claim",
+                                "claim": {
+                                    "claimant": "Demo User",
+                                    "proof": proof,
+                                    "status": "Pending",
+                                    "date": str(datetime.now().date())
+                                }
+                            }}
+                        )
+                        st.success("Claim embedded in document! Awaiting admin.")
+                        st.rerun()
+
+# --- 4. REPORT ITEM ---
+elif menu == "Report Item":
+    st.header("📝 Report a Lost or Found Item")
+    
+    with st.form("report_form"):
+        item_type = st.radio("I want to report a:", ["lost", "found"])
+        name = st.text_input("Item Name (e.g., Black Wallet)")
+        category = st.selectbox("Category", ["Electronics", "Documents", "Accessories", "Bags"])
+        description = st.text_area("Description")
+        location = st.text_input("Location (e.g., Library)")
+        date = st.date_input("Date")
+        
+        submit = st.form_submit_button("Save to MongoDB")
+        
+        if submit and name and description:
+            new_doc = {
+                "type": item_type,
+                "name": name,
+                "category": category,
+                "description": description,
+                "location": location,
+                "date": str(date),
+                "status": "Open",
+                "claim": None
+            }
+            items_col.insert_one(new_doc)
+            st.success("Document inserted into MongoDB successfully!")
+
+# --- 5. ADMIN PORTAL ---
+elif menu == "Admin Portal":
+    st.header("👮 Admin Dashboard")
+    
+    # Aggregation Pipeline to get stats
+    pipeline = [
+        {"$group": {
+            "_id": None,
+            "total": {"$sum": 1},
+            "pending_claims": {"$sum": {"$cond": [{"$eq": ["$claim.status", "Pending"]}, 1, 0]}},
+            "recovered": {"$sum": {"$cond": [{"$eq": ["$status", "Claimed"]}, 1, 0]}}
+        }}
+    ]
+    stats = list(items_col.aggregate(pipeline))
+    
+    if stats:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Items", stats[0].get("total", 0))
+        c2.metric("Pending Claims", stats[0].get("pending_claims", 0))
+        c3.metric("Recovered", stats[0].get("recovered", 0))
+
+    st.subheader("Pending Claims to Review")
+    pending = list(items_col.find({"claim.status": "Pending"}))
+    
+    if not pending:
+        st.info("No pending claims.")
+        
+    for item in pending:
+        st.warning(f"**{item['name']}** claimed by {item['claim']['claimant']}")
+        st.write(f"**Proof:** {item['claim']['proof']}")
+        
+        col1, col2 = st.columns(2)
+        if col1.button("✅ Approve", key=f"app_{item['_id']}"):
+            items_col.update_one(
+                {"_id": item["_id"]},
+                {"$set": {"status": "Claimed", "claim.status": "Approved"}}
+            )
+            st.success("Approved!")
+            st.rerun()
+            
+        if col2.button("❌ Reject", key=f"rej_{item['_id']}"):
+            items_col.update_one(
+                {"_id": item["_id"]},
+                {"$set": {"status": "Open", "claim.status": "Rejected"}}
+            )
+            st.success("Rejected.")
+            st.rerun()
